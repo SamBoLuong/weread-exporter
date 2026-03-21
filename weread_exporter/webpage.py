@@ -189,7 +189,7 @@ class WeReadWebPage(object):
 
     def _check_chrome(self) -> str:
         path_list = os.environ["PATH"].split(";" if sys.platform == "win32" else ":")
-        for chrome in ("chrome", "google-chrome"):
+        for chrome in ("chrome", "google-chrome", "google-chrome-stable"):
             if sys.platform == "win32":
                 chrome += ".exe"
             for path in path_list:
