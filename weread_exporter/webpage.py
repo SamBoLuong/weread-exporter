@@ -39,22 +39,34 @@ class WeReadWebPage(object):
         self._load_cookie()
         self._url = ""
 
-    async def get_book_info(self):
-        html = (await utils.fetch(self._home_url)).decode()
+    def _parse_initial_state(self, html):
+        if isinstance(html, bytes):
+            html = html.decode(errors="replace")
         pos1 = html.find("window.__INITIAL_STATE__")
-        if pos1 <= 0:
-            raise RuntimeError("Unexpected html: %s" % self._html)
+        if pos1 < 0:
+            raise RuntimeError("Unexpected html: __INITIAL_STATE__ not found")
         pos1 = html.find("=", pos1)
         pos2 = html.find("};", pos1)
+        if pos1 < 0 or pos2 < 0:
+            raise RuntimeError("Unexpected html: invalid __INITIAL_STATE__ data")
         data = html[pos1 + 1 : pos2 + 1].strip()
-        data = json.loads(data)
+        return json.loads(data)
+
+    async def get_book_info(self):
+        html = await utils.fetch(self._home_url)
+        data = self._parse_initial_state(html)
+        reader_data = data.get("reader") or {}
+        if "bookInfo" not in reader_data or "chapterInfos" not in reader_data:
+            raise RuntimeError(
+                "Unexpected html: reader.bookInfo/chapterInfos not found"
+            )
         book_info = {}
-        book_info["title"] = data["reader"]["bookInfo"]["title"]
-        book_info["author"] = data["reader"]["bookInfo"]["author"]
-        book_info["cover"] = data["reader"]["bookInfo"]["cover"]
-        book_info["intro"] = data["reader"]["bookInfo"]["intro"]
+        book_info["title"] = reader_data["bookInfo"]["title"]
+        book_info["author"] = reader_data["bookInfo"]["author"]
+        book_info["cover"] = reader_data["bookInfo"]["cover"]
+        book_info["intro"] = reader_data["bookInfo"]["intro"]
         book_info["chapters"] = []
-        for chapter in data["reader"]["chapterInfos"]:
+        for chapter in reader_data["chapterInfos"]:
             chap = {
                 "id": chapter["chapterUid"],
                 "title": chapter["title"],
@@ -149,8 +161,28 @@ class WeReadWebPage(object):
 
     async def check_valid(self):
         html = await utils.fetch(self._home_url)
-        if b'"soldout":1' in html:
+        try:
+            data = self._parse_initial_state(html)
+        except Exception as ex:
+            logging.warning(
+                "[%s] Parse book detail page %s failed: %s",
+                self.__class__.__name__,
+                self._home_url,
+                ex,
+            )
             return False
+
+        reader_data = data.get("reader") or {}
+        book_info = reader_data.get("bookInfo") or {}
+        if not book_info.get("title") or "chapterInfos" not in reader_data:
+            return False
+
+        if book_info.get("soldout") == 1:
+            logging.info(
+                "[%s] Book %s is sold out in store, keep exporting for readable purchases",
+                self.__class__.__name__,
+                self._book_id,
+            )
         return True
 
     def _check_chrome(self):

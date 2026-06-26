@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 
@@ -9,11 +10,26 @@ import bs4
 import markdown
 
 from ebooklib import epub
-from weasyprint import HTML, CSS
 
 from . import utils
 
 current_path = os.path.dirname(os.path.abspath(__file__))
+
+
+def _import_weasyprint():
+    try:
+        from weasyprint import CSS, HTML
+    except ModuleNotFoundError as ex:
+        raise RuntimeError(
+            "Exporting PDF requires weasyprint, please install dependencies with `pip install -r requirements.txt`."
+        ) from ex
+    except OSError as ex:
+        raise RuntimeError(
+            "Exporting PDF requires Cairo runtime libraries.\n"
+            "Conda: `conda install -c conda-forge cairo pango gdk-pixbuf`\n"
+            "macOS Homebrew: `brew install cairo pango gdk-pixbuf`"
+        ) from ex
+    return HTML, CSS
 
 
 class WeReadExporter(object):
@@ -37,6 +53,45 @@ class WeReadExporter(object):
 
     def _make_chapter_path(self, index, chapter_id):
         return os.path.join(self._chapter_dir, "%d-%s.md" % (index + 1, chapter_id))
+
+    def _extract_chapter_title_from_markdown(self, chapter_path):
+        with open(chapter_path, "rb") as fp:
+            text = fp.read().decode(errors="replace")
+
+        code_mode = False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line.startswith("```"):
+                code_mode = not code_mode
+                continue
+            if code_mode or not line:
+                continue
+            if line.startswith("#"):
+                title = line.lstrip("#").strip()
+                if title:
+                    return title
+        return ""
+
+    def _make_split_markdown_name(self, index, chapter_id, chapter_title, used_names):
+        chapter_title = chapter_title or "untitled"
+        chapter_title = utils.format_filename(chapter_title)
+        chapter_title = chapter_title.replace("\r", " ").replace("\n", " ")
+        for c in ('*', '?', '"', "<", ">", "|"):
+            chapter_title = chapter_title.replace(c, "_")
+        chapter_title = " ".join(chapter_title.split()).strip(" .")
+        if not chapter_title:
+            chapter_title = "untitled"
+        chapter_title = chapter_title[:80].strip(" .")
+        if not chapter_title:
+            chapter_title = "untitled"
+
+        base_name = "%04d-%s-%s" % (index + 1, chapter_id, chapter_title)
+        file_name = base_name + ".md"
+        if file_name in used_names:
+            suffix = utils.md5(file_name)[:8]
+            file_name = "%s-%s.md" % (base_name, suffix)
+        used_names.add(file_name)
+        return file_name
 
     async def _load_meta_data(self):
         if self._meta_data:
@@ -62,6 +117,46 @@ class WeReadExporter(object):
                     raise RuntimeError("File %s not exist" % file_path)
                 with open(file_path) as fd:
                     fp.write(fd.read() + "\n")
+
+    async def export_split_markdown(self, save_dir):
+        meta_data = await self._load_meta_data()
+        if not os.path.isdir(save_dir):
+            os.makedirs(save_dir)
+        image_save_dir = os.path.join(save_dir, "images")
+        if not os.path.isdir(image_save_dir):
+            os.makedirs(image_save_dir)
+
+        # Clean up stale chapter markdown files in output directory.
+        for file_name in os.listdir(save_dir):
+            file_path = os.path.join(save_dir, file_name)
+            if os.path.isfile(file_path) and file_name.endswith(".md"):
+                os.remove(file_path)
+
+        used_names = set()
+        for index, chapter in enumerate(meta_data["chapters"]):
+            chapter_path = self._make_chapter_path(index, chapter["id"])
+            if not os.path.isfile(chapter_path):
+                raise RuntimeError("File %s not exist" % chapter_path)
+            chapter_title = chapter.get("title", "")
+            if not chapter_title:
+                chapter_title = self._extract_chapter_title_from_markdown(chapter_path)
+            file_name = self._make_split_markdown_name(
+                index, chapter["id"], chapter_title, used_names
+            )
+            shutil.copyfile(
+                chapter_path, os.path.join(save_dir, file_name)
+            )
+
+        # Keep images alongside split markdown so local image links still work.
+        for file_name in os.listdir(image_save_dir):
+            file_path = os.path.join(image_save_dir, file_name)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+
+        for file_name in os.listdir(self._image_dir):
+            source_path = os.path.join(self._image_dir, file_name)
+            if os.path.isfile(source_path):
+                shutil.copyfile(source_path, os.path.join(image_save_dir, file_name))
 
     async def pre_process_markdown(self):
         meta_data = await self._load_meta_data()
@@ -154,6 +249,7 @@ class WeReadExporter(object):
     async def markdown_to_pdf(
         self, save_path, extra_css=None, image_format="jpg", dump_html=False
     ):
+        HTML, CSS = _import_weasyprint()
         meta_data = await self._load_meta_data()
         raw_html = '<img src="cover.jpg" style="width: 100%;">\n'
         for index, chapter in enumerate(meta_data["chapters"]):

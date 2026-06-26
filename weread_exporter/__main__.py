@@ -77,7 +77,8 @@ async def async_main():
         help="http proxy server, e.g. http://127.0.0.1:8888",
     )
     args = parser.parse_args()
-    args.output_format = args.output_format or ["epub"]
+    args.output_format = args.output_format or ["epub", "md"]
+    args.output_format = list(dict.fromkeys(args.output_format))
     if "mobi" in args.output_format and "epub" not in args.output_format:
         args.output_format.append("epub")
 
@@ -135,6 +136,17 @@ async def async_main():
         await exporter.pre_process_markdown()
         title = await exporter.get_book_title()
         title = utils.format_filename(title)
+        if "md" in args.output_format:
+            save_path = os.path.join(output_dir, "%s.md" % title)
+            if os.path.isfile(save_path):
+                logging.info("File %s exist, ignore export" % save_path)
+            else:
+                await exporter.merge_markdown(save_path)
+                logging.info("Save file %s complete" % save_path)
+            split_save_dir = os.path.join(output_dir, "%s_markdown" % title)
+            await exporter.export_split_markdown(split_save_dir)
+            logging.info("Save dir %s complete" % split_save_dir)
+
         if "epub" in args.output_format:
             save_path = os.path.join(output_dir, "%s.epub" % title)
             if os.path.isfile(save_path):
@@ -197,11 +209,18 @@ def main():
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(async_main())
+    except SystemExit as ex:
+        return ex.code
+    except RuntimeError as ex:
+        logging.error(str(ex))
+        return 1
     except:
         import traceback
 
         traceback.print_exc()
-        return
+        return 1
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":
